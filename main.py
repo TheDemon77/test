@@ -9,12 +9,20 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
-# --- الإعدادات ---
-API_ID = 25039908
+# --- الإعدادات الإجبارية ---
+# تأكد أن API_ID رقم (integer) وليس نص بين علامات تنصيص
+API_ID = 25039908 
 API_HASH = "2b23aae7b7120dca6a0a5ee2cbbbdf4c"
-BOT_TOKEN = "8531856638:AAFBWDCXZ1RAyIE45rTF7VkqyeZXty1uiAM"
+BOT_TOKEN = "8324347850:AAGmwux8ZSPo33x14z8WzMKOFlJBtPE0q_4"
 
-app = Client("manga_merger_pro", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# تعريف العميل مع إجبار القيم
+app = Client(
+    "manga_merger_pro",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    plugins=None # لضمان عدم تحميل أي إعدادات خارجية قديمة
+)
 
 # مخازن البيانات
 user_files = {}
