@@ -10,7 +10,7 @@ from pyrogram.types import Message
 # --- الإعدادات (تأكد من صحة البيانات الخاصة بك) ---
 API_ID = 25039908
 API_HASH = "2b23aae7b7120dca6a0a5ee2cbbbdf4c"
-BOT_TOKEN = "8361569086:AAE5I0c0wxr4H9G0Z0LFKjzpM7etfbg8Zjg"
+BOT_TOKEN = "8361569086:AAGvuIAZ7BgHyU0jbMEzC-30RB591_VV7aE"
 
 app = Client("manga_merger_pro", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -44,7 +44,7 @@ async def start(client, message):
         "2️⃣ عند الانتهاء، أرسل أمر /merge للبدء."
     )
 
-# 2. استقبال الملفات وترتيبها فوراً
+# 1. تحديث دالة استقبال الملفات لتعديل رسالة واحدة فقط
 @app.on_message(filters.document & filters.private)
 async def handle_pdf(client, message):
     if not message.document.file_name.lower().endswith('.pdf'):
@@ -56,33 +56,52 @@ async def handle_pdf(client, message):
     os.makedirs("downloads", exist_ok=True)
     file_path = os.path.join("downloads", f"{user_id}_{message.document.file_name}")
     
-    msg = await message.reply_text(f"📥 جاري تحميل: {message.document.file_name}...")
+    # تحميل الملف في الخلفية بدون إرسال رسالة "جاري التحميل" لكل ملف
     await message.download(file_name=file_path)
     user_files[user_id].append(file_path)
-    
-    # الترتيب الذكي بعد كل إضافة (لضمان بقاء القائمة منظمة)
     user_files[user_id].sort(key=natural_sort_key)
     
-    await msg.edit_text(
-        f"✅ تم استلام: {message.document.file_name}\n"
-        f"📊 عدد الملفات الحالي: {len(user_files[user_id])}\n\n"
-        "💡 إذا انتهيت من إرسال كل الفصول، أرسل الآن أمر /merge للبدء."
-    )
+    count = len(user_files[user_id])
+    status_text = f"📊 تم استلام {count} ملفات حتى الآن...\n\n💡 أرسل /merge عندما تنتهي."
 
-# 3. أمر الدمج وطلب الاسم والوصف
+    # البحث عن رسالة الحالة السابقة وتحديثها
+    if user_id not in user_states: user_states[user_id] = {}
+    
+    msg_id = user_states[user_id].get("status_msg_id")
+
+    if msg_id:
+        try:
+            # تعديل الرسالة الموجودة بدلاً من إرسال واحدة جديدة
+            await client.edit_message_text(message.chat.id, msg_id, status_text)
+        except:
+            # إذا حُذفت الرسالة لأي سبب، نرسل واحدة جديدة ونحفظ رقمها
+            new_msg = await message.reply_text(status_text)
+            user_states[user_id]["status_msg_id"] = new_msg.id
+    else:
+        # أول ملف يتم رفعه يرسل رسالة الحالة لأول مرة
+        new_msg = await message.reply_text(status_text)
+        user_states[user_id]["status_msg_id"] = new_msg.id
+
+# 2. تحديث أمر الدمج لحذف رسالة الحالة عند البدء
 @app.on_message(filters.command("merge") & filters.private)
 async def merge_command(client, message):
     user_id = message.from_user.id
     if user_id not in user_files or len(user_files[user_id]) < 2:
         return await message.reply_text("❌ أرسل ملفين على الأقل أولاً!")
     
-    # عرض الترتيب الحالي للمستخدم للتأكد
+    # حذف رسالة التنبيه المزعجة لتنظيف الشات قبل عرض الترتيب
+    msg_id = user_states.get(user_id, {}).get("status_msg_id")
+    if msg_id:
+        try: await client.delete_messages(message.chat.id, msg_id)
+        except: pass
+
+    # عرض الترتيب كما طلبته سابقاً
     files_list = "\n".join([os.path.basename(f).split('_', 1)[1] for f in user_files[user_id]])
     await message.reply_text(f"🔍 الترتيب الذي سيتم الدمج به:\n\n{files_list}")
     
-    user_states[user_id] = {"step": "get_name"}
-    await message.reply_text("📝 ممتاز، أرسل الآن الاسم الذي تريده للملف النهائي (بدون أي إضافات):")
-
+    user_states[user_id]["step"] = "get_name"
+    await message.reply_text("📝 أرسل الآن الاسم الذي تريده للملف النهائي:")
+    
 # 4. معالجة النصوص (الاسم ثم الوصف ثم التنفيذ)
 @app.on_message(filters.text & filters.private & ~filters.command(["start", "merge"]))
 async def handle_logic(client, message):
