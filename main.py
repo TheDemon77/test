@@ -10,7 +10,7 @@ from pyrogram.types import Message
 # --- الإعدادات ---
 API_ID = 25039908
 API_HASH = "2b23aae7b7120dca6a0a5ee2cbbbdf4c"
-BOT_TOKEN = "8361569086:AAGmwzD0Y2vIPnvqJ5MG7ts_R2dLV-1CjZg"
+BOT_TOKEN = "8361569086:AAEjpqQBnDDVo1HnOWQ0YqjwUK5UvVbHm5U"
 
 app = Client("manga_merger_pro", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
