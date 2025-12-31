@@ -13,7 +13,7 @@ from pyrogram.errors import FloodWait
 # تأكد أن API_ID رقم (integer) وليس نص بين علامات تنصيص
 API_ID = 25039908 
 API_HASH = "2b23aae7b7120dca6a0a5ee2cbbbdf4c"
-BOT_TOKEN = "8324347850:AAGmwux8ZSPo33x14z8WzMKOFlJBtPE0q_4"
+BOT_TOKEN = "8324347850:AAHtVH5Rkj-qfPfUu7lxAMBQZ8pL2tk_PWc"
 
 # تعريف العميل مع إجبار القيم
 app = Client(
@@ -192,16 +192,17 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host='0.0.0.0', port=port)
 
-# --- تشغيل البوت مع معالجة الـ FloodWait ---
 if __name__ == "__main__":
+    # تشغيل Flask في Thread منفصل
     threading.Thread(target=run_flask, daemon=True).start()
-    while True:
-        try:
-            app.run()
-            break
-        except FloodWait as e:
-            print(f"⚠️ FloodWait: يجب الانتظار {e.value} ثانية...")
-            time.sleep(e.value)
-        except Exception as e:
-            print(f"❌ خطأ مفاجئ: {str(e)}")
-            time.sleep(5)
+    
+    print("🚀 Speed Manga Bot is starting...")
+    
+    try:
+        app.run()
+    except FloodWait as e:
+        print(f"⚠️ سبام تليجرام: انتظر {e.value} ثانية...")
+        time.sleep(e.value)
+        # هنا ممكن تحاول تشغله تاني بعد الانتظار
+    except Exception as e:
+        print(f"❌ خطأ غير متوقع: {str(e)}")
