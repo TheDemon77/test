@@ -1,5 +1,0 @@
-[phases.setup]
-nixPkgs = ["python3", "ghostscript"]
-
-[start]
-cmd = "python3 main.py"
