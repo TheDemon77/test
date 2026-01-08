@@ -13,7 +13,7 @@ from pyrogram.errors import FloodWait
 # --- الإعدادات ---
 API_ID = 25039908 
 API_HASH = "2b23aae7b7120dca6a0a5ee2cbbbdf4c"
-BOT_TOKEN = "8531856638:AAH-JpyNdSZfV-z80jj5LdvjVoFH-8FJGh0"
+BOT_TOKEN = "8531856638:AAEi-A4H-bjovQge5bLutQHdFAkJ1suG_3A"
 
 # إعداد العميل (in_memory=True ضرورية جداً للريلواي لتجنب مشاكل الجلسة)
 app = Client(
