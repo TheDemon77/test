@@ -4,60 +4,61 @@ import shutil
 import time
 import asyncio
 import logging
-from datetime import datetime
 from threading import Thread
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters
 from pyrogram.errors import FloodWait, MessageNotModified
 from PyPDF2 import PdfMerger
 from flask import Flask
 
 # ==========================================
-# ⚙️ الإعدادات
+# ⚙️ إعدادات البوت
 # ==========================================
 API_ID = 25039908  
 API_HASH = "2b23aae7b7120dca6a0a5ee2cbbbdf4c"
-BOT_TOKEN = "8544321667:AAEDkqE9_-ILvM348UmTUDHRaTWyJOJ77pk"
+BOT_TOKEN = "8544321667:AAHG5AnLLUMSE9P52TXBnMc6DH4KQl4zNnk"
 
-# إعداد السجل (Log) ليكون هادئاً إلا في المصائب
+# تقليل الإزعاج في الكونسول
 logging.basicConfig(level=logging.ERROR)
 
 app = Client(
-    "manga_master_bot",
+    "manga_pro_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     workers=10, 
-    max_concurrent_transmissions=2 
+    max_concurrent_transmissions=3
 )
 
 # ==========================================
-# 🧠 الذاكرة ونظام القفل (The Brain)
+# 🧠 إدارة الجلسات (بمنطق الحالة الصارم)
 # ==========================================
 
-class UserSession:
-    def __init__(self, user_id):
-        self.user_id = user_id
+class Session:
+    def __init__(self, uid):
+        self.uid = uid
         self.files = []
         self.total_size = 0
-        self.status_msg = None
-        self.step = 'idle'
-        # القفل السحري لمنع تكرار الرسائل
-        self.lock = asyncio.Lock() 
-        self.last_edit_time = 0
+        self.msg = None          # رسالة لوحة التحكم
+        self.last_update = 0     # وقت آخر تحديث للرسالة
+        # الحالات: idle -> collecting -> waiting_name -> processing
+        self.state = 'idle'      
+        self.lock = asyncio.Lock() # قفل لتنظيم الملفات
 
 sessions = {}
 
-# ==========================================
-# 🛠️ الدوال المساعدة
-# ==========================================
-
-def get_session(user_id):
-    if user_id not in sessions:
-        sessions[user_id] = UserSession(user_id)
-        path = f"downloads/{user_id}"
+def get_session(uid):
+    if uid not in sessions:
+        sessions[uid] = Session(uid)
+        # تنظيف المجلد عند بداية الجلسة
+        path = f"downloads/{uid}"
         if os.path.exists(path): shutil.rmtree(path, ignore_errors=True)
         os.makedirs(path, exist_ok=True)
-    return sessions[user_id]
+    return sessions[uid]
+
+def natural_key(file_path):
+    """ترتيب الملفات بذكاء: الفصل 10 بعد 9"""
+    base = os.path.basename(file_path)
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', base)]
 
 def format_size(size):
     for unit in ['B', 'KB', 'MB', 'GB']:
@@ -65,173 +66,174 @@ def format_size(size):
         size /= 1024.0
     return f"{size:.2f} TB"
 
-def smart_sort_key(file_path):
-    # ترتيب الأرقام صح (9 يجي قبل 10)
-    base = os.path.basename(file_path)
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', base)]
-
 # ==========================================
-# 🎮 أوامر البوت
+# 🎮 الأوامر والمعالجة
 # ==========================================
 
 @app.on_message(filters.command(["start", "reset"]))
-async def start_handler(client, message):
+async def start(client, message):
     uid = message.from_user.id
     if uid in sessions:
         shutil.rmtree(f"downloads/{uid}", ignore_errors=True)
         del sessions[uid]
     
     await message.reply_text(
-        "👋 **أهلاً بك يا مدير!**\n\n"
-        "الآن الوضع آمن وسريع:\n"
-        "1️⃣ وجه (Forward) كل الملفات مرة واحدة.\n"
-        "2️⃣ سأعرض لك **رسالة واحدة** تتحدث تلقائياً (بدون تكرار).\n"
-        "3️⃣ عند الانتهاء أرسل **/done**."
+        "👋 **مرحباً بك في نظام الدمج الذكي**\n\n"
+        "1️⃣ وجه (Forward) الملفات الآن (سأظهر لك عداد حي).\n"
+        "2️⃣ عند الانتهاء أرسل **/done**.\n\n"
+        "🔒 **ملاحظة:** أنا أمنع التكرار، وأرتب الفصول بدقة."
     )
 
-# --- الاستقبال الذكي (المحمي بالقفل) ---
+# --- 1. استلام الملفات (المشكلة كانت هنا واتحلت) ---
 @app.on_message(filters.document)
-async def receive_files(client, message):
+async def handle_docs(client, message):
     if not message.document.file_name.lower().endswith('.pdf'): return
 
     uid = message.from_user.id
-    session = get_session(uid)
+    sess = get_session(uid)
 
-    if session.step == 'processing':
-        return await message.reply_text("⛔ مشغول في دمج ملفات سابقة!")
+    # لو البوت مشغول أو بيطلب اسم، يتجاهل الملفات الجديدة لمنع اللخبطة
+    if sess.state not in ['idle', 'collecting']:
+        return 
 
-    # 1. التخزين أولاً
-    path = f"downloads/{uid}/{message.document.file_name}"
-    await message.download(file_name=path)
-    
-    # استخدام القفل لضمان عدم تداخل التحديثات
-    async with session.lock:
-        session.files.append(path)
-        session.total_size += message.document.file_size
-        count = len(session.files)
-        size_str = format_size(session.total_size)
+    sess.state = 'collecting'
+
+    # التحميل
+    try:
+        f_path = f"downloads/{uid}/{message.document.file_name}"
+        await message.download(file_name=f_path)
         
-        # نص لوحة التحكم
-        dashboard_text = (
-            f"📥 **لوحة الاستلام الموحدة**\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"📊 **عدد الملفات:** `{count}`\n"
-            f"💾 **الحجم الحالي:** `{size_str}`\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"⚡ وجه باقي الملفات، ثم أرسل **/done**"
-        )
-
-        try:
-            # لو مفيش رسالة، ابعت واحدة جديدة
-            if session.status_msg is None:
-                session.status_msg = await message.reply_text(dashboard_text)
+        async with sess.lock: # طابور نظامي
+            sess.files.append(f_path)
+            sess.total_size += message.document.file_size
             
-            # لو فيه رسالة، عدلها بس بشرط يعدي ثانيتين عالاقل عشان الحظر
-            elif (time.time() - session.last_edit_time) > 2:
+            # --- منطق تحديث "لوحة التحكم" ---
+            count = len(sess.files)
+            size_fmt = format_size(sess.total_size)
+            
+            text = (
+                f"📥 **جاري تجميع الملفات...**\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"📚 **العدد:** `{count}`\n"
+                f"💾 **الحجم:** `{size_fmt}`\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💡 عند الانتهاء أرسل **/done**"
+            )
+
+            # أول ملف؟ ابعت رسالة فوراً
+            if sess.msg is None:
+                sess.msg = await message.reply_text(text)
+                sess.last_update = time.time()
+            
+            # ملفات تالية؟ حدث الرسالة كل 3 ثواني فقط (عشان التليجرام ميزعلش)
+            elif time.time() - sess.last_update > 3:
                 try:
-                    await session.status_msg.edit_text(dashboard_text)
-                    session.last_edit_time = time.time()
+                    await sess.msg.edit_text(text)
+                    sess.last_update = time.time()
                 except MessageNotModified:
-                    pass # تجاهل لو الرسالة هي هي
-                    
-        except Exception as e:
-            print(f"Error updating msg: {e}")
+                    pass
+                except Exception:
+                    # لو الرسالة القديمة اتمسحت، ابعت واحدة جديدة
+                    sess.msg = await message.reply_text(text)
 
-# --- أمر التنفيذ ---
+    except Exception as e:
+        print(f"Error downloading: {e}")
+
+# --- 2. إنهاء الاستلام (الحل الجذري لتكرار الرسالة) ---
 @app.on_message(filters.command("done"))
-async def done_handler(client, message):
+async def done_cmd(client, message):
     uid = message.from_user.id
-    if uid not in sessions or not sessions[uid].files:
-        return await message.reply_text("❌ لم أستلم أي شيء!")
-    
-    session = sessions[uid]
-    session.step = 'waiting_name'
-    count = len(session.files)
-    
-    # حذف رسالة العداد القديمة لتنظيف الشات
-    if session.status_msg:
-        try: await session.status_msg.delete()
-        except: pass
+    if uid not in sessions:
+        return await message.reply_text("❌ لم أستلم ملفات بعد.")
 
+    sess = sessions[uid]
+
+    # --- ⛔ قفل لمنع التكرار ⛔ ---
+    # لو الحالة مش "تجميع"، معناها احنا ردينا عليه قبل كده -> اخرج فوراً
+    if sess.state != 'collecting':
+        return 
+
+    # تغيير الحالة فوراً عشان لو ضغط تاني ميحصلش حاجة
+    sess.state = 'waiting_name'
+
+    # مسح رسالة العداد القديمة عشان الشات ينضف
+    if sess.msg:
+        try: await sess.msg.delete()
+        except: pass
+    
     await message.reply_text(
-        f"✅ **تم استلام {count} ملف بنجاح.**\n\n"
-        f"🏷️ **الآن: أرسل الاسم الذي تريده للملف النهائي:**"
+        f"✅ **تم قفل القائمة: {len(sess.files)} ملف.**\n"
+        f"🔖 **أرسل اسم الملف النهائي الآن:**"
     )
 
-# --- المعالجة والرفع ---
-@app.on_message(filters.text & ~filters.command(["start", "reset", "done"]))
+# --- 3. الدمج والرفع (الأخير) ---
+@app.on_message(filters.text & ~filters.command(["start", "done"]))
 async def process(client, message):
     uid = message.from_user.id
-    session = sessions.get(uid)
-    if not session or session.step != 'waiting_name': return
-
-    # إعداد الاسم
-    name = message.text.strip().replace('/', '-')
-    if not name.endswith('.pdf'): name += ".pdf"
+    sess = sessions.get(uid)
     
-    session.step = 'processing'
-    msg = await message.reply_text("⏳ **جاري الترتيب والدمج... (انتظر قليلاً)**")
+    if not sess or sess.state != 'waiting_name': return
 
-    output_path = f"downloads/{uid}/{name}"
+    # تجهيز الاسم
+    fname = message.text.strip().replace('/', '-')
+    if not fname.endswith('.pdf'): fname += ".pdf"
+
+    sess.state = 'processing' # قفل نهائي
     
-    # دمج في Thread
-    def merging_job():
+    status = await message.reply_text("⏳ **جاري الترتيب والدمج...**")
+    out_path = f"downloads/{uid}/{fname}"
+
+    # عملية الدمج في الخلفية
+    def do_merge():
         merger = PdfMerger()
-        session.files.sort(key=smart_sort_key) # الترتيب الذكي
-        for f in session.files: merger.append(f)
-        merger.write(output_path)
+        sess.files.sort(key=natural_key) # الترتيب السحري
+        for f in sess.files: merger.append(f)
+        merger.write(out_path)
         merger.close()
-    
-    loop = asyncio.get_event_loop()
+
     try:
-        await loop.run_in_executor(None, merging_job)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, do_merge)
     except Exception as e:
-        return await msg.edit_text(f"❌ حدث خطأ في الملفات: {e}")
+        return await status.edit_text(f"❌ ملف تالف: {e}")
 
     # الرفع مع شريط تقدم
-    await msg.edit_text("🚀 **بدء الرفع للسيرفر...**")
+    await status.edit_text("🚀 **جاري الرفع... 0%**")
     
-    last_update = 0
-    
-    async def progress_bar(current, total):
-        nonlocal last_update
-        # تحديث كل 4 ثواني فقط لمنع الخطأ 400 MessageNotModified
-        if time.time() - last_update < 4 and current != total:
-            return
-        last_update = time.time()
+    last_p_time = 0
+    async def prog(cur, tot):
+        nonlocal last_p_time
+        # تحديث كل 4 ثواني فقط
+        if time.time() - last_p_time < 4 and cur != tot: return
+        last_p_time = time.time()
         
         try:
-            percentage = current * 100 / total
-            await msg.edit_text(
-                f"📤 **جاري الرفع:** `{percentage:.1f}%`\n"
-                f"📦 `{current//1024**2}MB / {total//1024**2}MB`"
-            )
-        except MessageNotModified:
-            pass # أهم سطر لحل مشكلتك
-        except Exception:
-            pass
+            p = (cur/tot)*100
+            await status.edit_text(f"🚀 **جاري الرفع... {p:.1f}%**")
+        except: pass
 
     try:
         await client.send_document(
-            chat_id=message.chat.id,
-            document=output_path,
-            caption=f"📦 **{name}**\n📚 عدد الفصول: {len(session.files)}",
-            progress=progress_bar
+            message.chat.id,
+            document=out_path,
+            caption=f"📦 **{fname}**\n🗂 عدد الفصول: {len(sess.files)}",
+            progress=prog
         )
-        await msg.delete()
-        await message.reply_text("✅ **تمت العملية بنجاح!**\n/start لعملية جديدة.")
+        await status.delete()
+        await message.reply_text("✅ **تم! أرسل /start لبدء جديد.**")
     except Exception as e:
-        await msg.edit_text(f"❌ خطأ الرفع: {e}")
-
+        await status.edit_text(f"❌ خطأ الرفع: {e}")
+    
     # تنظيف
     shutil.rmtree(f"downloads/{uid}", ignore_errors=True)
     del sessions[uid]
 
-# تشغيل
-flask = Flask(__name__)
-@flask.route('/')
-def h(): return "Bot OK"
-def r(): flask.run(host='0.0.0.0', port=8080)
-if __name__ == "__main__":
+# Flask Stay-Alive
+app_web = Flask(__name__)
+@app_web.route('/')
+def i(): return "ON"
+def r(): app_web.run(host='0.0.0.0', port=8080)
+
+if __name__ == '__main__':
     Thread(target=r, daemon=True).start()
     app.run()
