@@ -1,253 +1,169 @@
 import os
-import re
 import shutil
 import asyncio
-import logging
-from threading import Thread
 from pyrogram import Client, filters
-from pyrogram.errors import MessageNotModified, FloodWait
 from PyPDF2 import PdfMerger
 from flask import Flask
+from threading import Thread
 
-# ==========================================
-# ⚙️ إعدادات البوت
-# ==========================================
+# --- إعدادات البوت ---
 API_ID = 25039908  
 API_HASH = "2b23aae7b7120dca6a0a5ee2cbbbdf4c"
-BOT_TOKEN = "8198010213:AAEH0N-cO4rUUg_G89Gp47W_w-LFHrnq-7A"
+BOT_TOKEN = "8198010213:AAFQXf43_4tei9ijTs-zOCB5iVvYa9N8b_0"
 
-logging.basicConfig(level=logging.ERROR)
-
+# إضافة in_memory=True حل لمشكلة الـ FloodWait والتوكن
 app = Client(
-    "manga_master_bot",
+    "simple_merger",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=20, # زيادة العمال لاستيعاب سرعة الـ Forward
-    max_concurrent_transmissions=4
+    in_memory=True, 
+    workers=4
 )
 
-# ==========================================
-# 🧠 العقل المدبر (إدارة الجلسات)
-# ==========================================
+# قاعدة البيانات والأقفال
+users_data = {}
+user_locks = {} # هذا هو الحل الجذري للتكرار
 
-class Session:
-    def __init__(self, uid):
-        self.uid = uid
-        self.files = []
-        self.total_size = 0
-        self.status_msg = None  # كائن الرسالة الحالية
-        self.worker_task = None # مهمة المراقبة في الخلفية
-        self.state = 'collecting' # collecting -> naming -> merging
-        self.stop_signal = False
+def get_lock(uid):
+    if uid not in user_locks:
+        user_locks[uid] = asyncio.Lock()
+    return user_locks[uid]
 
-sessions = {}
+# --- دالة مساعدة لترتيب الملفات (عشان 10 تيجي بعد 9) ---
+import re
+def sort_key(s):
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split('([0-9]+)', os.path.basename(s))]
 
-# دالة تحويل الحجم لشكل مقروء
-def format_size(size):
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size < 1024.0: return f"{size:.2f} {unit}"
-        size /= 1024.0
-    return f"{size:.2f} TB"
-
-# دالة الترتيب الذكي للأرقام
-def natural_key(file_path):
-    base = os.path.basename(file_path)
-    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', base)]
-
-# ==========================================
-# 👷‍♂️ وظيفة المراقب (الحل السحري للتكرار)
-# ==========================================
-
-async def dashboard_worker(client, chat_id, uid):
-    """هذه الدالة تعمل في الخلفية، تحدث الرسالة كل 3 ثواني"""
-    session = sessions.get(uid)
-    if not session: return
-
-    while not session.stop_signal:
-        try:
-            count = len(session.files)
-            size_fmt = format_size(session.total_size)
-            
-            # نص اللوحة
-            text = (
-                f"📥 **نظام التجميع الآلي**\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"📚 **العدد المستلم:** `{count}`\n"
-                f"💾 **الحجم الحالي:** `{size_fmt}`\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"⚡ جاري الاستلام... (أرسل **/done** عند الانتهاء)"
-            )
-
-            # المنطق: لو مفيش رسالة، ابعت واحدة. لو فيه، عدلها.
-            if session.status_msg is None:
-                # هذه اللحظة الحاسمة: إرسال أول رسالة
-                session.status_msg = await client.send_message(chat_id, text)
-            else:
-                # محاولة التعديل الهادئ
-                try:
-                    await session.status_msg.edit_text(text)
-                except MessageNotModified:
-                    pass # تجاهل لو الرسالة هي هي
-                except Exception as e:
-                    # لو الرسالة اتمسحت بالغلط، نعمل واحدة جديدة
-                    session.status_msg = await client.send_message(chat_id, text)
-
-        except Exception as e:
-            print(f"Worker Error: {e}")
-
-        # انتظر 2.5 ثانية قبل التحديث التالي (لمنع الحظر)
-        await asyncio.sleep(2.5)
-
-# ==========================================
-# 🎮 الأوامر
-# ==========================================
-
+# --- 1. الأمر Start (تنظيف شامل) ---
 @app.on_message(filters.command(["start", "reset"]))
-async def start_handler(client, message):
+async def start(client, message):
     uid = message.from_user.id
-    
-    # تنظيف أي جلسة قديمة
-    if uid in sessions:
-        sessions[uid].stop_signal = True # وقف العامل القديم
-        if sessions[uid].worker_task:
-            sessions[uid].worker_task.cancel()
-        shutil.rmtree(f"downloads/{uid}", ignore_errors=True)
-    
-    # جلسة جديدة نظيفة
-    sessions[uid] = Session(uid)
-    os.makedirs(f"downloads/{uid}", exist_ok=True)
+    if uid in users_data:
+        path = f"downloads/{uid}"
+        if os.path.exists(path): shutil.rmtree(path, ignore_errors=True)
+        del users_data[uid]
     
     await message.reply_text(
-        "✨ **مرحباً بك!**\n\n"
-        "🚀 **ابدأ فوراً:** قم بتوجيه (Forward) الملفات الآن.\n"
-        "سيظهر لك عداد واحد فقط يتحدث تلقائياً."
+        "👋 **نظام الدمج البسيط**\n\n"
+        "1. وجه (Forward) الملفات.\n"
+        "2. اكتب /done لما تخلص.\n\n"
+        "لن أرد عليك مع كل ملف لتسريع العمل."
     )
 
-# --- 1. مستقبل الملفات الصامت ---
+# --- 2. استلام الملفات (تحميل صامت) ---
 @app.on_message(filters.document)
-async def receive_files(client, message):
+async def handle_doc(client, message):
     if not message.document.file_name.lower().endswith('.pdf'): return
-
+    
     uid = message.from_user.id
-    if uid not in sessions:
-        # لو المستخدم بعت ملف من غير ما يعمل start، نعمله جلسة اوتوماتيك
-        sessions[uid] = Session(uid)
-        os.makedirs(f"downloads/{uid}", exist_ok=True)
+    lock = get_lock(uid)
 
-    session = sessions[uid]
-    
-    # لو المستخدم خرج من مود التجميع، منتجاهلش الملفات
-    if session.state != 'collecting': return
-
-    # 1. تشغيل "المراقب" لو مش شغال (يعمل لمرة واحدة فقط)
-    if session.worker_task is None:
-        session.worker_task = asyncio.create_task(dashboard_worker(client, message.chat.id, uid))
-
-    # 2. التحميل والإضافة للقائمة (بسرعة)
-    try:
-        f_path = f"downloads/{uid}/{message.document.file_name}"
-        await message.download(file_name=f_path)
+    # استخدام القفل لضمان عدم تداخل العمليات
+    async with lock:
+        if uid not in users_data:
+            users_data[uid] = {'files': [], 'state': 'collecting'}
+            os.makedirs(f"downloads/{uid}", exist_ok=True)
         
-        session.files.append(f_path)
-        session.total_size += message.document.file_size
-        
-        # ملاحظة: احنا هنا مبنبعتش رسائل خالص! المراقب اللي فوق هو اللي بيعمل كده
-        
-    except Exception as e:
-        print(f"DL Error: {e}")
+        # لو المستخدم مش في حالة تجميع، نرفض الملف
+        if users_data[uid]['state'] != 'collecting':
+            return
 
-# --- 2. إنهاء التجميع ---
-@app.on_message(filters.command("done"))
-async def stop_collecting(client, message):
-    uid = message.from_user.id
-    if uid not in sessions: return
-
-    session = sessions[uid]
-    
-    # إيقاف المراقب فوراً
-    session.stop_signal = True
-    if session.worker_task:
-        session.worker_task.cancel()
-    
-    session.state = 'naming'
-    
-    # مسح رسالة العداد لتنظيف الشات
-    if session.status_msg:
-        try: await session.status_msg.delete()
-        except: pass
-
-    await message.reply_text(
-        f"✅ **تم استلام {len(session.files)} ملف.**\n"
-        f"💾 **الحجم الكلي:** {format_size(session.total_size)}\n\n"
-        f"✍️ **الآن: أرسل الاسم الذي تريده للملف النهائي:**"
-    )
-
-# --- 3. الدمج والرفع ---
-@app.on_message(filters.text & ~filters.command(["start", "done"]))
-async def process_manga(client, message):
-    uid = message.from_user.id
-    session = sessions.get(uid)
-    if not session or session.state != 'naming': return
-
-    # تجهيز الاسم
-    fname = message.text.strip().replace('/', '-')
-    if not fname.endswith('.pdf'): fname += ".pdf"
-    
-    session.state = 'merging'
-    status = await message.reply_text("⏳ **جاري الترتيب والدمج...**")
-
-    output = f"downloads/{uid}/{fname}"
-
-    # دالة الدمج (Blocking Code) في Thread منفصل
-    def do_merge():
-        merger = PdfMerger()
-        session.files.sort(key=natural_key) # الترتيب الذكي
-        for f in session.files: merger.append(f)
-        merger.write(output)
-        merger.close()
-
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, do_merge)
-    except Exception as e:
-        return await status.edit_text(f"❌ ملف تالف أو غير مدعوم: {e}")
-
-    # الرفع
-    await status.edit_text("🚀 **جاري الرفع...**")
-    
-    last_up_time = 0
-    async def prog(current, total):
-        nonlocal last_up_time
-        if time.time() - last_up_time < 4 and current != total: return
-        last_up_time = time.time()
+        # التحميل
         try:
-            percent = (current/total)*100
-            await status.edit_text(f"🚀 **جاري الرفع... {percent:.1f}%**")
-        except: pass
+            f_path = f"downloads/{uid}/{message.document.file_name}"
+            await message.download(file_name=f_path)
+            users_data[uid]['files'].append(f_path)
+            # مفيش أي رد هنا (Silent)
+        except Exception as e:
+            print(f"Error dl: {e}")
 
-    try:
-        await client.send_document(
-            message.chat.id,
-            document=output,
-            caption=f"📦 **{fname}**\n🗂 عدد الفصول: {len(session.files)}",
-            progress=prog
+# --- 3. أمر Done (مع منع التكرار الصارم) ---
+@app.on_message(filters.command("done"))
+async def done(client, message):
+    uid = message.from_user.id
+    if uid not in users_data: return await message.reply_text("❌ ابدأ بـ /start")
+
+    lock = get_lock(uid)
+    async with lock:
+        # فحص الحالة: لو احنا مش في "تجميع" يبقي الأمر ده اتنفذ قبل كده
+        # وهذا يمنع الرد المزدوج 100%
+        if users_data[uid]['state'] != 'collecting':
+            return 
+            
+        users_data[uid]['state'] = 'waiting_name'
+        count = len(users_data[uid]['files'])
+        
+        await message.reply_text(
+            f"✅ تم استلام {count} ملف.\n"
+            f"✍️ **ارسل اسم الملف النهائي:**"
         )
-        await status.delete()
-        await message.reply_text("✅ **تمت العملية!**\nارسل /start من جديد.")
-    except Exception as e:
-        await status.edit_text(f"❌ فشل الرفع: {e}")
 
-    # تنظيف نهائي
-    shutil.rmtree(f"downloads/{uid}", ignore_errors=True)
-    del sessions[uid]
+# --- 4. الدمج والرفع (Robust) ---
+@app.on_message(filters.text & ~filters.command(["start", "done"]))
+async def process(client, message):
+    uid = message.from_user.id
+    if uid not in users_data: return
+    
+    lock = get_lock(uid)
+    async with lock:
+        # فحص الحالة تاتي لمنع التكرار
+        if users_data[uid]['state'] != 'waiting_name':
+            return
+            
+        name = message.text.strip().replace('/', '-')
+        if not name.endswith('.pdf'): name += ".pdf"
+        
+        users_data[uid]['state'] = 'processing'
+        msg = await message.reply_text("⏳ جاري الدمج...")
 
-# Flask
-f_app = Flask(__name__)
-@f_app.route('/')
-def home(): return "OK"
-def run_flask(): f_app.run(host='0.0.0.0', port=8080)
+        out_path = f"downloads/{uid}/{name}"
+        files = sorted(users_data[uid]['files'], key=sort_key)
+        
+        if not files:
+            await msg.edit_text("❌ لا توجد ملفات!")
+            users_data[uid]['state'] = 'collecting'
+            return
+
+        # عملية الدمج المباشرة (بدون تعقيدات)
+        try:
+            merger = PdfMerger()
+            for pdf in files:
+                merger.append(pdf)
+            
+            merger.write(out_path)
+            merger.close()
+            
+        except Exception as e:
+            await msg.edit_text(f"❌ خطأ تقني في الدمج: {e}")
+            return
+
+        # الرفع
+        await msg.edit_text("🚀 جاري الرفع...")
+        try:
+            await client.send_document(
+                message.chat.id,
+                document=out_path,
+                caption=f"📦 {name}"
+            )
+            await msg.delete()
+            await message.reply_text("✅ تم.")
+            
+            # تنظيف
+            shutil.rmtree(f"downloads/{uid}", ignore_errors=True)
+            del users_data[uid]
+            
+        except Exception as e:
+            await msg.edit_text(f"❌ خطأ في الرفع: {e}")
+
+# تشغيل
+app_web = Flask(__name__)
+@app_web.route('/')
+def h(): return "Bot Running"
+def r(): app_web.run(host='0.0.0.0', port=8080)
 
 if __name__ == "__main__":
-    Thread(target=run_flask, daemon=True).start()
+    Thread(target=r, daemon=True).start()
+    print("Bot started...")
     app.run()
