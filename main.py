@@ -14,7 +14,7 @@ from flask import Flask
 # ==========================================
 API_ID = 25039908  
 API_HASH = "2b23aae7b7120dca6a0a5ee2cbbbdf4c"
-BOT_TOKEN = "8544321667:AAH0moHP20SxbbUfI2C3dpm5fXIH6mn_u1U"
+BOT_TOKEN = "8198010213:AAEH0N-cO4rUUg_G89Gp47W_w-LFHrnq-7A"
 
 logging.basicConfig(level=logging.ERROR)
 
