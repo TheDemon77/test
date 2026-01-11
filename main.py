@@ -1,162 +1,159 @@
 import os
-import asyncio
-import shutil
 import re
+import shutil
+import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import Message
 from PyPDF2 import PdfMerger
-from threading import Thread
 from flask import Flask
+from threading import Thread
 
-# --- ⚠️ بياناتك ⚠️ ---
-# غير هذه البيانات فوراً لأنك نشرتها سابقاً
+# --- بيانات البوت ---
 API_ID = 25039908  
 API_HASH = "2b23aae7b7120dca6a0a5ee2cbbbdf4c"
-BOT_TOKEN = "8544321667:AAGp8vO6WZh27BAHI2mdaWQyMOgh8Zematc"
+BOT_TOKEN = "8544321667:AAERohdWfuUDonBm5hat_7BnJFMuUlFJcNI"
 
-# إنشاء البوت
-app = Client("clean_manga_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("smart_manga_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# تخزين مؤقت لبيانات المستخدمين
-# الهيكل: { user_id: { 'files': [], 'name': None, 'processing': False } }
+# الذاكرة المؤقتة
 users_db = {}
 
-# دالة الترتيب (عشان 10 تيجي بعد 9 مش بعد 1)
-def natural_sort_key(s):
-    base = os.path.basename(s)
-    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', base)]
+# --- 🧠 دالة الترتيب الذكي (الجوهرية) ---
+def smart_sort_key(file_path):
+    """
+    تستخرج الأرقام من اسم الملف وترتب بناء عليها.
+    مثال: 'black-clover_ch217.pdf' -> سيتم استخراج الرقم 217 للترتيب.
+    """
+    base_name = os.path.basename(file_path)
+    # البحث عن كل الأرقام في الاسم
+    numbers = re.findall(r'\d+', base_name)
+    if numbers:
+        # تحويل الأرقام لنصوص صحيحة (مثلاً 217 أهم من الاسم نفسه)
+        # نقوم بإرجاع قائمة أرقام، ثم الاسم للنصوص المتشابهة
+        return [int(num) for num in numbers]
+    else:
+        # لو مفيش أرقام خالص، رتب أبجدي عادي
+        return base_name.lower()
 
-# دالة دمج (تعمل في الخلفية)
-def merge_files_engine(file_list, output_path):
+# --- محرك الدمج ---
+def merge_engine(files, output_path):
     merger = PdfMerger()
     try:
-        for file in file_list:
+        # الترتيب هنا قبل الدمج مباشرة
+        files.sort(key=smart_sort_key)
+        
+        for file in files:
             merger.append(file)
         merger.write(output_path)
         merger.close()
         return True
     except Exception as e:
-        print(f"Error merging: {e}")
+        print(f"Merge Error: {e}")
         return False
 
-# --- الأوامر ---
-
-@app.on_message(filters.command("start"))
-async def start_msg(client, message):
+# --- 1. الأمر: /start (تنظيف وبدء جديد) ---
+@app.on_message(filters.command(["start", "clear"]))
+async def start_handler(client, message):
     uid = message.from_user.id
-    # تنظيف بداية جديد
+    # تنظيف ملفات المستخدم القديمة فوراً
     if uid in users_db:
         shutil.rmtree(f"downloads/{uid}", ignore_errors=True)
-    users_db[uid] = {'files': [], 'processing': False}
+    
+    users_db[uid] = {'files': [], 'step': 'collecting'}
     
     await message.reply_text(
-        "👋 **أهلاً بك!**\n\n"
-        "الآن **قم بتوجيه (Forward)** ملفات الـ PDF من أي قناة للبوت.\n"
-        "عندما تنتهي من التوجيه، أرسل كلمة **/done** أو **/merge**.\n\n"
-        "💡 *نصيحة:* حدد الملفات كلها ووجهها مرة واحدة."
+        "🧹 **تم تنظيف الذاكرة!**\n\n"
+        "1️⃣ وجه (Forward) الملفات الآن (من 1 لـ 20 مثلاً).\n"
+        "2️⃣ **لن أرسل أي رد** أثناء التحميل لتوفير الوقت.\n"
+        "3️⃣ عندما تنتهي، أرسل: **/done**"
     )
 
-# استقبال الملفات (المحرك الصامت)
+# --- 2. الاستلام الصامت (The Silent Receiver) ---
 @app.on_message(filters.document)
-async def handle_docs(client, message):
-    if not message.document.file_name.lower().endswith('.pdf'):
-        return # تجاهل أي شيء ليس PDF
+async def document_handler(client, message):
+    if not message.document.file_name.lower().endswith('.pdf'): return
 
     uid = message.from_user.id
+    if uid not in users_db: users_db[uid] = {'files': [], 'step': 'collecting'}
     
-    # تهيئة المستخدم لو أول مرة يبعت
-    if uid not in users_db:
-        users_db[uid] = {'files': [], 'processing': False}
+    # لو المستخدم في مرحلة انتظار الاسم، نتجاهل الملفات الجديدة منعاً للأخطاء
+    if users_db[uid].get('step') != 'collecting':
+        return
+
+    # التحميل فوراً
+    user_dir = f"downloads/{uid}"
+    os.makedirs(user_dir, exist_ok=True)
+    file_path = os.path.join(user_dir, message.document.file_name)
     
-    if users_db[uid]['processing']:
-        return await message.reply_text("⛔ انتظر، أنا أقوم بعملية دمج حالياً!")
+    # تحميل صامت (بدون await status msg)
+    await message.download(file_name=file_path)
+    users_db[uid]['files'].append(file_path)
+    print(f"User {uid}: Downloaded {message.document.file_name}") 
 
-    # تحميل صامت (بدون رسائل) لعدم تعليق البوت
-    try:
-        file_path = f"downloads/{uid}/{message.document.file_name}"
-        # التأكد من المجلد
-        os.makedirs(f"downloads/{uid}", exist_ok=True)
-        
-        await message.download(file_name=file_path)
-        users_db[uid]['files'].append(file_path)
-        
-        # لا نرسل رد هنا نهائياً لتسريع التوجيه الجماعي
-        # البوت هيخزن ويسكت
-        
-    except Exception as e:
-        print(f"Failed to download: {e}")
-
-# أمر الإنهاء والدمج
-@app.on_message(filters.command(["merge", "done"]))
-async def start_merging(client, message):
+# --- 3. الأمر: /done (إنهاء التجميع) ---
+@app.on_message(filters.command("done"))
+async def done_handler(client, message):
     uid = message.from_user.id
     if uid not in users_db or not users_db[uid]['files']:
-        return await message.reply_text("❌ لم تقم بتوجيه أي ملفات لي بعد!")
+        return await message.reply_text("❌ لم ترسل لي أي ملفات بعد!")
     
-    count = len(users_db[uid]['files'])
-    await message.reply_text(
-        f"📦 **تم استلام {count} ملف بنجاح.**\n"
-        "📝 **أرسل الآن الاسم الذي تريده للملف النهائي:**"
-    )
-    # وضع علامة أننا ننتظر الاسم
+    files_count = len(users_db[uid]['files'])
     users_db[uid]['step'] = 'waiting_name'
-
-# استقبال الاسم وبدء العملية
-@app.on_message(filters.text & ~filters.command(["start", "merge", "done"]))
-async def processing_step(client, message):
-    uid = message.from_user.id
-    user_data = users_db.get(uid)
     
-    if not user_data or user_data.get('step') != 'waiting_name':
+    await message.reply_text(
+        f"✅ **تم استلام {files_count} ملف بنجاح!**\n"
+        f"🔄 سيتم الترتيب تلقائياً حسب أرقام الفصول.\n\n"
+        f"📝 **أرسل الآن اسم الملف النهائي:**"
+    )
+
+# --- 4. استلام الاسم والدمج ---
+@app.on_message(filters.text & ~filters.command(["start", "done", "clear"]))
+async def name_and_process(client, message):
+    uid = message.from_user.id
+    data = users_db.get(uid)
+    
+    if not data or data['step'] != 'waiting_name':
         return
 
     # استلام الاسم
     filename = message.text.strip().replace('/', '-')
     if not filename.endswith('.pdf'): filename += ".pdf"
     
-    # قفل المستخدم
-    user_data['processing'] = True
-    user_data['step'] = None # إنهاء الخطوة
+    msg = await message.reply_text("⏳ **جاري الترتيب والدمج...**")
     
-    status_msg = await message.reply_text("⏳ **جاري الترتيب والدمج...**")
-
-    # ترتيب الملفات
-    files = sorted(user_data['files'], key=natural_sort_key)
+    data['step'] = 'processing' # قفل الاستلام
     output_path = f"downloads/{uid}/{filename}"
     
-    # تشغيل الدمج في Thread عشان البوت ميهنجش
+    # تشغيل الدمج
     loop = asyncio.get_event_loop()
-    success = await loop.run_in_executor(None, merge_files_engine, files, output_path)
-
+    success = await loop.run_in_executor(None, merge_engine, data['files'], output_path)
+    
     if success:
-        await status_msg.edit_text("🚀 **جاري الرفع...**")
+        await msg.edit_text("📤 **جاري الرفع...**")
         try:
             await client.send_document(
                 chat_id=message.chat.id,
                 document=output_path,
-                caption=f"✅ تم دمج {len(files)} فصل.\n📁 الاسم: {filename}"
+                caption=f"📦 **{filename}**\n📄 عدد الفصول: {len(data['files'])}"
             )
-            await status_msg.delete()
+            await msg.delete()
+            # تنظيف بعد النجاح مباشرة عشان تكون جاهز للدفعة القادمة
+            shutil.rmtree(f"downloads/{uid}", ignore_errors=True)
+            users_db[uid] = {'files': [], 'step': 'collecting'}
+            await message.reply_text("✅ **تم! أرسل الدفعة التالية (مثلاً 21-40) وقم بتوجيهها مباشرة.**")
+            
         except Exception as e:
-            await message.reply_text(f"خطأ في الرفع: {e}")
+            await msg.edit_text(f"❌ خطأ في الرفع: {e}")
     else:
-        await status_msg.edit_text("❌ حدث خطأ أثناء دمج الملفات (قد يكون أحد الملفات معطوب).")
+        await msg.edit_text("❌ حدث خطأ في ملفات PDF، تأكد أنها سليمة.")
 
-    # تنظيف
-    shutil.rmtree(f"downloads/{uid}", ignore_errors=True)
-    del users_db[uid]
-
-# --- تشغيل وهمي للسيرفر (عشان الاستضافة) ---
-flask = Flask(__name__)
-@flask.route('/')
-def home(): return "Manga Bot Online"
+# تشغيل السيرفر (Railway Support)
+web = Flask(__name__)
+@web.route('/')
+def home(): return "Bot OK"
 
 def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    flask.run(host='0.0.0.0', port=port)
+    web.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 
 if __name__ == "__main__":
-    # تشغيل السيرفر في الخلفية
     Thread(target=run_web, daemon=True).start()
-    print("🤖 Bot Started...")
     app.run()
